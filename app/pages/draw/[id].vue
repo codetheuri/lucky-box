@@ -326,6 +326,11 @@ async function verifyProof() {
           </p>
         </div>
 
+        <p v-if="draw.mode === 'numbers' && !draw.complete" class="mb-3 text-sm leading-relaxed text-muted">
+          The number on the outside is just the paper's label. Your real number, from 1 to {{ draw.size }},
+          is written inside and was shuffled before anyone picked.
+        </p>
+
         <div class="rounded-3xl border border-line bg-paper-dark/50 p-3 sm:p-4">
           <div class="grid grid-cols-3 gap-2.5 sm:grid-cols-4 sm:gap-3">
             <button
@@ -351,14 +356,14 @@ async function verifyProof() {
 
               <!-- Opened -->
               <template v-else>
-                <span class="absolute top-2 left-2.5 text-[10px] font-semibold text-current/50 tabular-nums">{{ box.number }}</span>
+                <span class="absolute top-2 left-2.5 text-[10px] font-semibold text-current/50 tabular-nums">Paper {{ box.number }}</span>
                 <span
                   v-if="myPick === box.number"
                   class="absolute top-1.5 right-1.5 rounded-full bg-brand-700 px-1.5 py-0.5 text-[9px] font-bold tracking-wide text-white uppercase"
                 >You</span>
 
                 <template v-if="draw.mode === 'numbers'">
-                  <span class="text-[10px] font-semibold tracking-wider text-muted uppercase">No.</span>
+                  <span class="text-[10px] font-semibold tracking-wider text-muted uppercase">Number</span>
                   <span class="font-display text-4xl leading-none font-extrabold text-brand-700 tabular-nums">{{ box.value }}</span>
                 </template>
                 <template v-else-if="isWin(box)">
@@ -393,7 +398,8 @@ async function verifyProof() {
 
         <p v-if="!draw.proof" class="mt-4 text-sm leading-relaxed text-muted">
           The full list of papers stays hidden until every paper is picked. It then appears here, and anyone can
-          confirm that its SHA-256 equals the fingerprint at the top. A match means the YES could not have been moved.
+          confirm that its SHA-256 equals the fingerprint at the top. A match means
+          {{ draw.mode === 'winner' ? 'the YES could not have been moved' : 'the numbers could not have been swapped' }}.
         </p>
 
         <template v-else>
@@ -487,12 +493,12 @@ async function verifyProof() {
             class="unfold w-full max-w-xs rounded-3xl p-8 text-center shadow-2xl"
             :class="draw?.mode === 'winner' && reveal.value === 'YES' ? 'paper-winner' : 'bg-paper'"
           >
-            <p class="text-xs font-semibold tracking-[0.14em] text-ink/50 uppercase">Paper {{ reveal.boxNumber }}</p>
+            <p class="text-xs font-semibold tracking-[0.14em] text-ink/50 uppercase">You opened paper {{ reveal.boxNumber }}</p>
 
             <template v-if="draw?.mode === 'numbers'">
-              <p class="mt-6 text-sm text-muted">Your payout number</p>
+              <p class="mt-6 text-sm text-muted">Your number is</p>
               <p class="font-display text-8xl leading-none font-extrabold text-brand-700 tabular-nums">{{ reveal.value }}</p>
-              <p class="mt-3 text-sm text-muted">of {{ draw?.size }}</p>
+              <p class="mt-3 text-sm text-muted">in the payout order of {{ draw?.size }}</p>
             </template>
             <template v-else-if="reveal.value === 'YES'">
               <span class="mx-auto mt-6 grid h-16 w-16 place-items-center rounded-2xl bg-brand-800 text-gold-300">
