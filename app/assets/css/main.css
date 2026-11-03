@@ -1,0 +1,49 @@
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Plus Jakarta Sans", ui-sans-serif, system-ui, sans-serif;
+  --font-display: "Bricolage Grotesque", "Plus Jakarta Sans", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
+
+  --color-canvas: #f5f1e8;
+  --color-ink: #1b1a17;
+  --color-muted: #6b665c;
+  --color-line: #e4dccb;
+
+  --color-paper: #fffaf0;
+  --color-paper-dark: #f1e6cf;
+  --color-crease: #e2d3b3;
+
+  --color-brand-50: #ecf7f0;
+  --color-brand-100: #d2ecdc;
+  --color-brand-500: #23885a;
+  --color-brand-600: #1b6f49;
+  --color-brand-700: #155a3b;
+  --color-brand-800: #0f4530;
+  --color-brand-900: #0b3424;
+
+  --color-gold-300: #f6d77a;
+  --color-gold-400: #f0c24b;
+  --color-gold-500: #d9a521;
+}
+
+html { -webkit-tap-highlight-color: transparent; }
+body {
+  @apply bg-canvas font-sans text-ink antialiased;
+  background-image:
+    radial-gradient(1200px 500px at 50% -200px, rgb(35 136 90 / 0.10), transparent 70%);
+  background-attachment: fixed;
+}
+
+@utility input {
+  @apply h-12 w-full rounded-xl border border-line bg-white px-4 text-base text-ink shadow-sm transition
+    placeholder:text-muted/60 focus:border-brand-500 focus:ring-4 focus:ring-brand-500/15 focus:outline-none;
+}
+@utility btn {
+  @apply inline-flex items-center justify-center gap-2 rounded-xl font-semibold transition
+    active:scale-[0.98] disabled:pointer-events-none disabled:opacity-60;
+}
+@utility btn-primary { @apply btn bg-brand-700 text-white shadow-sm shadow-brand-900/20 hover:bg-brand-800; }
+@utility btn-ghost { @apply btn border border-line bg-white text-ink hover:bg-paper; }
+@utility card { @apply rounded-2xl border border-line bg-white/80 shadow-sm backdrop-blur; }
+@utility eyebrow { @apply text-xs font-semibold tracking-[0.14em] text-brand-600 uppercase; }
