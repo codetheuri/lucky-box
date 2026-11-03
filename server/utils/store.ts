@@ -1,5 +1,6 @@
 import { createHash, randomBytes, randomInt } from 'node:crypto'
 import { Redis } from '@upstash/redis'
+import IORedis from 'ioredis'
 
 export type DrawMode = 'winner' | 'numbers'
 
@@ -49,59 +50,100 @@ const TTL_MS = TTL_SECONDS * 1000
 /* ------------------------------------------------------------------ */
 
 interface Backend {
+  readonly kind: 'upstash-rest' | 'redis-tcp' | 'memory'
   save(draw: SealedDraw): Promise<void>
   load(id: string): Promise<{ draw: SealedDraw; claims: Claims } | null>
   /** Must be atomic: two simultaneous claims on one box can never both succeed. */
   claim(id: string, box: number, name: string): Promise<ClaimResult>
 }
 
+const keysFor = (id: string) => ({
+  draw: `chama:draw:${id}`,
+  claims: `chama:draw:${id}:claims`,
+  names: `chama:draw:${id}:names`,
+})
+
+/** HGETALL may come back as an object or as a flat [field, value, ...] array depending on the client. */
+function toClaims(raw: unknown): Claims {
+  if (!raw) return {}
+  if (Array.isArray(raw)) {
+    const out: Claims = {}
+    for (let i = 0; i + 1 < raw.length; i += 2) out[String(raw[i])] = String(raw[i + 1])
+    return out
+  }
+  return Object.fromEntries(Object.entries(raw as Record<string, unknown>).map(([k, v]) => [k, String(v)]))
+}
+
 /**
- * Upstash Redis — used on Vercel (serverless functions don't share memory).
- * HSETNX makes the claim atomic across every function instance.
+ * Upstash Redis over REST (Vercel Marketplace "Upstash", or upstash.com).
+ * HSETNX makes the claim atomic across every serverless instance.
  */
-function redisBackend(url: string, token: string): Backend {
+function upstashBackend(url: string, token: string): Backend {
   const redis = new Redis({ url, token, automaticDeserialization: false })
-  const k = (id: string) => ({
-    draw: `chama:draw:${id}`,
-    claims: `chama:draw:${id}:claims`,
-    names: `chama:draw:${id}:names`,
-  })
 
   return {
+    kind: 'upstash-rest',
     async save(draw) {
-      await redis.set(k(draw.id).draw, JSON.stringify(draw), { ex: TTL_SECONDS })
+      await redis.set(keysFor(draw.id).draw, JSON.stringify(draw), { ex: TTL_SECONDS })
     },
-
     async load(id) {
-      const keys = k(id)
-      const [raw, claims] = await redis
-        .pipeline()
-        .get<string>(keys.draw)
-        .hgetall<Claims>(keys.claims)
-        .exec<[string | null, Claims | null]>()
+      const k = keysFor(id)
+      const [raw, claims] = await redis.pipeline().get(k.draw).hgetall(k.claims).exec<[unknown, unknown]>()
       if (!raw) return null
-      return { draw: JSON.parse(raw) as SealedDraw, claims: claims ?? {} }
+      return { draw: JSON.parse(String(raw)) as SealedDraw, claims: toClaims(claims) }
     },
-
     async claim(id, box, name) {
-      const keys = k(id)
+      const k = keysFor(id)
       // Reserve the name first so one person can't hold two boxes.
-      const nameOk = await redis.hsetnx(keys.names, name.toLowerCase(), String(box))
-      if (!nameOk) return 'name_taken'
-
-      const boxOk = await redis.hsetnx(keys.claims, String(box), name)
-      if (!boxOk) {
-        await redis.hdel(keys.names, name.toLowerCase())
+      if (!(await redis.hsetnx(k.names, name.toLowerCase(), String(box)))) return 'name_taken'
+      if (!(await redis.hsetnx(k.claims, String(box), name))) {
+        await redis.hdel(k.names, name.toLowerCase())
         return 'box_taken'
       }
-
-      await redis.pipeline().expire(keys.claims, TTL_SECONDS).expire(keys.names, TTL_SECONDS).exec()
+      await redis.pipeline().expire(k.claims, TTL_SECONDS).expire(k.names, TTL_SECONDS).exec()
       return 'ok'
     },
   }
 }
 
-/** In-memory Map — local development fallback when no Redis credentials are set. */
+/** Any Redis reachable by URL (redis:// or rediss://), e.g. Vercel Marketplace "Redis". */
+function tcpBackend(redisUrl: string): Backend {
+  const redis = new IORedis(redisUrl, {
+    maxRetriesPerRequest: 2,
+    connectTimeout: 8000,
+    // Many managed Redis hosts need TLS but hand out redis:// URLs; rediss:// enables it explicitly.
+    ...(redisUrl.startsWith('rediss://') ? { tls: {} } : {}),
+  })
+  redis.on('error', err => console.error('[chama] redis error:', err.message))
+
+  return {
+    kind: 'redis-tcp',
+    async save(draw) {
+      await redis.set(keysFor(draw.id).draw, JSON.stringify(draw), 'EX', TTL_SECONDS)
+    },
+    async load(id) {
+      const k = keysFor(id)
+      const res = await redis.pipeline().get(k.draw).hgetall(k.claims).exec()
+      const [[e1, raw], [e2, claims]] = res as [[Error | null, unknown], [Error | null, unknown]]
+      if (e1) throw e1
+      if (e2) throw e2
+      if (!raw) return null
+      return { draw: JSON.parse(String(raw)) as SealedDraw, claims: toClaims(claims) }
+    },
+    async claim(id, box, name) {
+      const k = keysFor(id)
+      if (!(await redis.hsetnx(k.names, name.toLowerCase(), String(box)))) return 'name_taken'
+      if (!(await redis.hsetnx(k.claims, String(box), name))) {
+        await redis.hdel(k.names, name.toLowerCase())
+        return 'box_taken'
+      }
+      await redis.pipeline().expire(k.claims, TTL_SECONDS).expire(k.names, TTL_SECONDS).exec()
+      return 'ok'
+    },
+  }
+}
+
+/** In-memory Map: local development only. */
 function memoryBackend(): Backend {
   const g = globalThis as typeof globalThis & {
     __chamaDraws?: Map<string, { draw: SealedDraw; claims: Claims }>
@@ -114,6 +156,7 @@ function memoryBackend(): Backend {
   }
 
   return {
+    kind: 'memory',
     async save(draw) {
       purge()
       draws.set(draw.id, { draw, claims: {} })
@@ -135,21 +178,61 @@ function memoryBackend(): Backend {
   }
 }
 
+/** Find an env var by exact name or by suffix (Vercel lets you set a custom prefix, e.g. STORAGE_KV_REST_API_URL). */
+function findEnv(...suffixes: string[]): { name: string; value: string } | undefined {
+  const env = process.env
+  for (const s of suffixes) if (env[s]) return { name: s, value: env[s]! }
+  for (const s of suffixes) {
+    const name = Object.keys(env).find(k => k.endsWith(`_${s}`) && env[k])
+    if (name) return { name, value: env[name]! }
+  }
+  return undefined
+}
+
 let backend: Backend | undefined
+let storageInfo = { kind: 'unconfigured' as Backend['kind'] | 'unconfigured', source: '' }
+
 function store(): Backend {
   if (backend) return backend
-  // Vercel's Upstash integration sets KV_REST_API_*; a direct Upstash setup uses UPSTASH_REDIS_REST_*.
-  const url = process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL
-  const token = process.env.KV_REST_API_TOKEN || process.env.UPSTASH_REDIS_REST_TOKEN
-  if (url && token) {
-    backend = redisBackend(url, token)
-  } else {
-    if (process.env.VERCEL) {
-      console.warn('[chama] No Redis credentials found — draws will NOT persist on Vercel.')
+
+  // 1. Upstash REST credentials.
+  const restUrl = findEnv('KV_REST_API_URL', 'UPSTASH_REDIS_REST_URL')
+  if (restUrl) {
+    const tokenName = restUrl.name.replace(/URL$/, 'TOKEN')
+    const token = process.env[tokenName] || findEnv('KV_REST_API_TOKEN', 'UPSTASH_REDIS_REST_TOKEN')?.value
+    if (token) {
+      backend = upstashBackend(restUrl.value, token)
+      storageInfo = { kind: backend.kind, source: restUrl.name }
+      return backend
     }
-    backend = memoryBackend()
   }
+
+  // 2. A plain Redis connection URL.
+  const tcpUrl = findEnv('REDIS_URL', 'KV_URL')
+  if (tcpUrl && /^rediss?:\/\//.test(tcpUrl.value)) {
+    backend = tcpBackend(tcpUrl.value)
+    storageInfo = { kind: backend.kind, source: tcpUrl.name }
+    return backend
+  }
+
+  // 3. Nothing configured. Memory only works on a single long-running server, never on Vercel.
+  if (process.env.VERCEL) {
+    throw createError({
+      statusCode: 503,
+      message: 'Storage is not configured. Connect a Redis database to this Vercel project and redeploy.',
+    })
+  }
+  backend = memoryBackend()
+  storageInfo = { kind: backend.kind, source: 'in-process' }
   return backend
+}
+
+/** Used by /api/health: which storage is active, and does a round trip work? */
+export async function checkStorage() {
+  const started = Date.now()
+  const b = store()
+  await b.load('healthcheck')
+  return { ...storageInfo, ok: true, latencyMs: Date.now() - started }
 }
 
 /* ------------------------------------------------------------------ */
